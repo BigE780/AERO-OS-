@@ -2674,6 +2674,8 @@ const ClaudeApp = {
     OS.notify('💾','Alle gespeichert',`${saved} Datei(en) in /home/user/Documents/`);
   },
 
+  continueReply(id){const ta=document.getElementById('ccinput-'+id);if(!ta)return;ta.value='Schreib bitte genau dort weiter, wo du aufgehört hast.';this.send(id);},
+
   autoResize(id){
     const ta=document.getElementById('ccinput-'+id);if(!ta)return;
     ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,120)+'px';
@@ -2732,7 +2734,7 @@ const ClaudeApp = {
       <span style="width:7px;height:7px;border-radius:50%;background:#a040e0;animation:blink 1s ease-in-out .66s infinite"></span>
     </span>`;
 
-    let fullText='',tokenCount=0;
+    let fullText='',tokenCount=0,stopReason='';
 
     // During streaming: show raw text in a plain pre — zero regex, no DOM thrashing
     // We use a textarea-like pre so it scrolls naturally
@@ -2769,7 +2771,7 @@ const ClaudeApp = {
         },
         body:JSON.stringify({
           model:'claude-sonnet-4-20250514',
-          max_tokens:4096,
+          max_tokens:8192,
           system:'Du bist Claude, ein KI-Assistent eingebettet in AeroOS — ein Frutiger-Aero-themed Browser-Betriebssystem. Antworte hilfreich und auf Deutsch wenn der Nutzer Deutsch schreibt. Formatiere Antworten mit Markdown.',
           stream:true,
           messages:d.messages,
@@ -2811,6 +2813,7 @@ const ClaudeApp = {
               const evt=JSON.parse(data);
               if(evt.type==='message_start')this._dblog(id,`  input_tokens: ${evt.message?.usage?.input_tokens??'?'}`,'recv');
               if(evt.type==='message_delta'&&evt.usage)this._dblog(id,`  output_tokens: ${evt.usage.output_tokens}`,'recv');
+              if(evt.type==='message_delta'&&evt.delta?.stop_reason)stopReason=evt.delta.stop_reason;
               if(evt.type==='content_block_delta'&&evt.delta?.type==='text_delta'){
                 fullText+=evt.delta.text;
                 tokenCount=fullText.length;
@@ -2825,6 +2828,7 @@ const ClaudeApp = {
       const wasCancelled=!!this._controllers[id];
       const finalText=fullText||(wasCancelled?'_(abgebrochen)_':'');
       bubble.innerHTML=this._renderMd(finalText);
+      if(stopReason==='max_tokens'){bubble.innerHTML+=`<div style="margin-top:8px;padding:6px 10px;border-radius:6px;background:rgba(255,200,80,.1);border:1px solid rgba(255,200,80,.3);color:#ffcc50;font-size:11px">⚠️ Antwort wurde wegen Token-Limit gekürzt. <button onclick="ClaudeApp.continueReply('${id}')" style="margin-left:6px;padding:2px 8px;border-radius:4px;border:1px solid rgba(255,200,80,.4);background:transparent;color:#ffcc50;cursor:pointer">▶ Weiter</button></div>`;}
       const msgs2=document.getElementById('ccmsgs-'+id);
       if(msgs2)msgs2.scrollTop=msgs2.scrollHeight;
 
@@ -3267,12 +3271,20 @@ Ausgabe-Regeln (STRIKT):
 - Bei Prosa-Input: vollständige funktionierende App bauen die genau das tut was beschrieben
 - Mach eine echte, vollständige, interaktive App`;
     try{
-      const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-        headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,system:SYSTEM,messages:[{role:'user',content:code}]})});
-      if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e?.error?.message||'HTTP '+resp.status);}
-      const data=await resp.json();
-      let generated=(data.content?.[0]?.text||'').trim();
+      let generated='',truncated=false,msgs=[{role:'user',content:code}];
+      for(let part=0;part<4;part++){
+        const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+          headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+          body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8192,system:SYSTEM,messages:msgs})});
+        if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e?.error?.message||'HTTP '+resp.status);}
+        const data=await resp.json();
+        generated+=data.content?.[0]?.text||'';
+        if(data.stop_reason!=='max_tokens')break;
+        if(part===3){truncated=true;break;}
+        msgs=[{role:'user',content:code},{role:'assistant',content:generated.trimEnd()}];
+      }
+      generated=generated.trim();
+      if(truncated)OS.notify('⚠️','KompAI','Output sehr lang, evtl. unvollständig');
       // Strip markdown fences
       generated=generated.replace(/^```[a-z]*\s*/i,'').replace(/\s*```$/,'').trim();
       // Safety checks
